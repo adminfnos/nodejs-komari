@@ -27,9 +27,9 @@ const NAME = process.env.NAME || '';
 
 if (!fs.existsSync(FILE_PATH)) fs.mkdirSync(FILE_PATH, { recursive: true });
 
-const npmName = "komari_" + Math.random().toString(36).substring(2, 5);
-const webName = "xray_" + Math.random().toString(36).substring(2, 5);
-const botName = "argo_" + Math.random().toString(36).substring(2, 5);
+const npmName = "komari_agent";
+const webName = "xray_bin";
+const botName = "argo_bin";
 const npmPath = path.join(FILE_PATH, npmName);
 const webPath = path.join(FILE_PATH, webName);
 const botPath = path.join(FILE_PATH, botName);
@@ -37,10 +37,24 @@ const bootLogPath = path.join(FILE_PATH, 'boot.log');
 
 app.get("/", (req, res) => res.send("Service is active"));
 
+// 获取 Komari 最新下载链接的函数
+async function getKomariUrl(arch) {
+    try {
+        const res = await axios.get('https://api.github.com/repos/komari-monitor/komari-agent/releases/latest');
+        // 在 release 资源中寻找包含 linux 和对应架构的下载项
+        const asset = res.data.assets.find(a => a.name.includes('linux') && a.name.includes(arch));
+        return asset ? asset.browser_download_url : null;
+    } catch (e) {
+        console.error("Failed to fetch latest Komari URL from GitHub API");
+        return null;
+    }
+}
+
 async function download(name, url, savePath) {
+    if (!url) return;
     try {
         const writer = fs.createWriteStream(savePath);
-        const response = await axios({ method: 'get', url: url, responseType: 'stream', timeout: 10000 });
+        const response = await axios({ method: 'get', url: url, responseType: 'stream', timeout: 30000 });
         response.data.pipe(writer);
         return new Promise((resolve, reject) => {
             writer.on('finish', () => {
@@ -52,7 +66,6 @@ async function download(name, url, savePath) {
         });
     } catch (e) {
         console.error(`[Error] ${name} download failed: ${e.message}`);
-        return Promise.resolve(); // 即使探针失败，也不要卡死主程序
     }
 }
 
@@ -61,21 +74,28 @@ async function main() {
     const arch = isArm ? 'arm64' : 'amd64';
     console.log(`Architecture: ${arch}`);
 
-    // 1. Xray 下载
+    // 1. 下载 Xray 和 Argo (这两个源比较稳定)
     const xrayUrl = isArm ? "https://arm64.ssss.nyc.mn/web" : "https://amd64.ssss.nyc.mn/web";
-    await download('Xray', xrayUrl, webPath);
-
-    // 2. Argo 下载
     const argoUrl = isArm ? "https://arm64.ssss.nyc.mn/bot" : "https://amd64.ssss.nyc.mn/bot";
-    await download('Argo', argoUrl, botPath);
+    
+    await Promise.all([
+        download('Xray', xrayUrl, webPath),
+        download('Argo', argoUrl, botPath)
+    ]);
 
-    // 3. Komari 下载 (更正后的文件名: komari-agent-linux-xxx)
+    // 2. 动态获取 Komari 下载链接并下载
     if (NEZHA_SERVER && NEZHA_KEY) {
-        const komariUrl = `https://github.com/komari-monitor/komari-agent/releases/download/v0.1.1/komari-agent-linux-${arch}`;
-        await download('Komari', komariUrl, npmPath);
+        console.log("Fetching latest Komari download URL...");
+        const komariUrl = await getKomariUrl(arch);
+        if (komariUrl) {
+            console.log(`Found Komari URL: ${komariUrl}`);
+            await download('Komari', komariUrl, npmPath);
+        } else {
+            console.error("Could not find a suitable Komari binary for this architecture.");
+        }
     }
 
-    // 启动 Xray
+    // --- 启动逻辑 ---
     if (fs.existsSync(webPath)) {
         const config = {
             log: { loglevel: 'none' },
@@ -87,23 +107,24 @@ async function main() {
         };
         fs.writeFileSync(path.join(FILE_PATH, 'config.json'), JSON.stringify(config));
         exec(`nohup ${webPath} -c ${FILE_PATH}/config.json >/dev/null 2>&1 &`);
+        console.log("Xray started.");
     }
 
-    // 启动 Komari
     if (fs.existsSync(npmPath) && NEZHA_SERVER && NEZHA_KEY) {
+        // 修正启动参数：官方脚本使用的是 -e (entrypoint) 和 -t (token)
         exec(`nohup ${npmPath} -e ${NEZHA_SERVER} -t ${NEZHA_KEY} >/dev/null 2>&1 &`);
-        console.log("Komari process started.");
+        console.log("Komari agent started.");
     }
 
-    // 启动 Argo
     if (fs.existsSync(botPath)) {
         let argoArgs = ARGO_AUTH.length > 120 
             ? `tunnel --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}`
             : `tunnel --no-autoupdate --protocol http2 --logfile ${bootLogPath} --url http://localhost:${ARGO_PORT}`;
         exec(`nohup ${botPath} ${argoArgs} >/dev/null 2>&1 &`);
+        console.log("Argo started.");
     }
 
-    // 订阅链接生成
+    // 订阅生成
     setTimeout(() => {
         let domain = ARGO_DOMAIN;
         if (!domain && fs.existsSync(bootLogPath)) {
