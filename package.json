@@ -1,7 +1,7 @@
 {
-  "name": "nodejs-argo",
-  "version": "1,0,0",
-  "description": "Thsi is a node project",
+  "name": "nodejs-argo-komari",
+  "version": "1.0.0",
+  "description": "Nodejs project with Argo and Komari agent",
   "main": "index.js",
   "author": "eooce",
   "repository": "",
@@ -12,7 +12,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "latest",
+    "axios": "^1.6.0",
     "express": "^4.18.2"
   },
   "engines": {
