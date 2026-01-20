@@ -13,9 +13,7 @@ const FILE_PATH = process.env.FILE_PATH || './tmp';
 const SUB_PATH = process.env.SUB_PATH || 'sub';
 const UUID = process.env.UUID || '9afd1229-b893-40c1-84dd-51e7ce204913';
 
-// --- Komari 变量 (请在平台环境变量中填写) ---
-// NEZHA_SERVER 填 https://komari.afnos86.xx.kg
-// NEZHA_KEY 填你的 Token (例如 A2NP...)
+// --- Komari 变量 ---
 const NEZHA_SERVER = process.env.NEZHA_SERVER || ''; 
 const NEZHA_KEY = process.env.NEZHA_KEY || '';       
 
@@ -47,14 +45,11 @@ async function getKomariUrl(arch) {
     try {
         console.log(`[System] Fetching latest Komari assets for ${arch}...`);
         const res = await axios.get('https://api.github.com/repos/komari-monitor/komari-agent/releases/latest', { timeout: 10000 });
-        
-        // 在资源列表中匹配包含 linux 和对应架构的文件 (忽略 .sha256 结尾的文件)
         const asset = res.data.assets.find(a => 
             a.name.toLowerCase().includes('linux') && 
             a.name.toLowerCase().includes(arch) &&
             !a.name.endsWith('.sha256')
         );
-        
         if (asset) {
             console.log(`[System] Found latest version: ${res.data.tag_name}`);
             return asset.browser_download_url;
@@ -62,7 +57,6 @@ async function getKomariUrl(arch) {
     } catch (e) {
         console.error(`[System] GitHub API Error: ${e.message}, using fallback URL.`);
     }
-    // 如果 API 失败，使用当前已知的 1.1.40 稳定版地址
     return `https://github.com/komari-monitor/komari-agent/releases/download/v1.1.40/komari-agent-linux-${arch}`;
 }
 
@@ -93,23 +87,60 @@ async function main() {
     const arch = isArm ? 'arm64' : 'amd64';
     console.log(`[System] Architecture detected: ${arch}`);
 
-    // 1. 获取 Komari 链接
     let komariUrl = null;
     if (NEZHA_SERVER && NEZHA_KEY) {
         komariUrl = await getKomariUrl(arch);
     }
 
-    // 2. 准备下载任务
     const xrayUrl = isArm ? "https://arm64.ssss.nyc.mn/web" : "https://amd64.ssss.nyc.mn/web";
     const argoUrl = isArm ? "https://arm64.ssss.nyc.mn/bot" : "https://amd64.ssss.nyc.mn/bot";
     
-    // 依次执行下载
     await download('Xray', xrayUrl, webPath);
     await download('Argo', argoUrl, botPath);
     if (komariUrl) await download('Komari', komariUrl, npmPath);
 
-    // 3. 启动 Xray
     if (fs.existsSync(webPath)) {
         const config = {
             log: { loglevel: 'none' },
-            inbounds: [{ port: ARGO_PORT, protocol: 'vless', settings: { clients: [{ id: UUID }], fallbacks: [{ path: "/vless-argo", dest: 3002 }, { path: "/vmess-argo", dest: 3003 }, { path: "/trojan-argo", dest: 30
+            inbounds: [{ port: ARGO_PORT, protocol: 'vless', settings: { clients: [{ id: UUID }], fallbacks: [{ path: "/vless-argo", dest: 3002 }, { path: "/vmess-argo", dest: 3003 }, { path: "/trojan-argo", dest: 3004 }] }, streamSettings: { network: 'tcp' } },
+            { port: 3002, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID }] }, streamSettings: { network: "ws", wsSettings: { path: "/vless-argo" } } },
+            { port: 3003, listen: "127.0.0.1", protocol: "vmess", settings: { clients: [{ id: UUID }] }, streamSettings: { network: "ws", wsSettings: { path: "/vmess-argo" } } },
+            { port: 3004, listen: "127.0.0.1", protocol: "trojan", settings: { clients: [{ password: UUID }] }, streamSettings: { network: "ws", wsSettings: { path: "/trojan-argo" } } }],
+            outbounds: [{ protocol: "freedom" }]
+        };
+        fs.writeFileSync(path.join(FILE_PATH, 'config.json'), JSON.stringify(config));
+        exec(`nohup ${webPath} -c ${FILE_PATH}/config.json >/dev/null 2>&1 &`);
+        console.log("[System] Xray started.");
+    }
+
+    if (fs.existsSync(npmPath) && NEZHA_SERVER && NEZHA_KEY) {
+        exec(`nohup ${npmPath} -e ${NEZHA_SERVER} -t ${NEZHA_KEY} >/dev/null 2>&1 &`);
+        console.log("[System] Komari agent started.");
+    }
+
+    if (fs.existsSync(botPath)) {
+        let argoArgs = ARGO_AUTH.length > 120 
+            ? `tunnel --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}`
+            : `tunnel --no-autoupdate --protocol http2 --logfile ${bootLogPath} --url http://localhost:${ARGO_PORT}`;
+        exec(`nohup ${botPath} ${argoArgs} >/dev/null 2>&1 &`);
+        console.log("[System] Argo started.");
+    }
+
+    setTimeout(() => {
+        let domain = ARGO_DOMAIN;
+        if (!domain && fs.existsSync(bootLogPath)) {
+            const log = fs.readFileSync(bootLogPath, 'utf-8');
+            const match = log.match(/https?:\/\/([^ ]*trycloudflare\.com)/);
+            if (match) domain = match[1];
+        }
+        if (domain) {
+            const nodeName = NAME || 'Komari-Node';
+            const subTxt = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${domain}&type=ws&host=${domain}&path=%2Fvless-argo#${nodeName}`;
+            app.get(`/${SUB_PATH}`, (req, res) => res.send(Buffer.from(subTxt).toString('base64')));
+            console.log(`[Success] Subscription link ready at: /${SUB_PATH}`);
+        }
+    }, 15000);
+}
+
+main().catch(e => console.error("[Critical] Start failed:", e));
+app.listen(PORT, () => console.log(`[System] Http server listening on port ${PORT}`));
